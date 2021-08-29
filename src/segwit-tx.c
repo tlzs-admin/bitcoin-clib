@@ -30,6 +30,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include "crypto.h"
+#include "satoshi-types.h"
+#include "satoshi-tx.h"
+#include "satoshi-script.h"
+#include "utils.h"
+
+
+
+
 
 /***************************************************************************
   BIP: 143
@@ -103,14 +112,6 @@ The hashPrevouts, hashSequence, and hashOutputs calculated in an earlier verific
 in other inputs of the same transaction, so that the time complexity of the whole hashing process 
 reduces from O(n2) to O(n).
 ***************************************************************************/
-
-#include "crypto.h"
-#include "satoshi-types.h"
-#include "satoshi-tx.h"
-#include "satoshi-script.h"
-
-#include "utils.h"
-
 // step 2.
 static inline void prehash_prevouts(sha256_ctx_t * sha, ssize_t txin_count, const satoshi_txin_t * txins)
 {

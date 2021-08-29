@@ -7,6 +7,7 @@ extern "C" {
 #endif
 #include <stdint.h>
 #include "satoshi-types.h"
+#include <pthread.h>
 
 struct block_info;
 
@@ -50,9 +51,14 @@ typedef struct block_info
 	void (* hdr_free)(void *);	// set to NULL if no need to free
 	
 	int height;		// the index in the blockchain, -1 means not attached to any chains
-//	double cumulative_difficulty;
 
-	compact_uint256_t cumulative_difficulty;	// use compact_uint256 to represent cumulative difficulty.
+	/**
+	 *  sice the precision of compact int is limited, 
+	 * when the cumulative difficulty exceeds a certain value (2^^72), 
+	 * it cannot be able to accumulate correctly.
+	 */
+	double cumulative_difficulty;
+	// compact_uint256_t cumulative_difficulty;	// use compact_uint256 to represent cumulative difficulty.
 	
 	struct block_info * parent;	// there can be only one parent for each block
 	struct block_info * first_child;	// the first child will belong to the longest-chain
@@ -146,7 +152,16 @@ typedef struct blockchain_heir
 	uint64_t timestamp;	// add support for BIP0113 (Median time-past as endpoint for lock-time calculations)
 	
 	uint32_t bits;		// current target
-	compact_uint256_t cumulative_difficulty;
+	
+	/**
+	 *  sice the precision of compact int is limited, 
+	 * when the cumulative difficulty exceeds a certain value (2^^72), 
+	 * it cannot be able to accumulate correctly.
+	 */
+	double cumulative_difficulty;
+	//~ compact_uint256_t cumulative_difficulty;
+	
+	struct satoshi_block_header hdr[1];
 }blockchain_heir_t;
 
 
@@ -162,6 +177,7 @@ typedef struct blockchain
 	ssize_t max_size;
 	ssize_t height;
 	
+	pthread_mutex_t mutex;
 	void * search_root;
 	void * user_data;
 	struct active_chain_list candidates_list[1];
@@ -181,8 +197,13 @@ typedef struct blockchain
 	 *     callbacks for updating utxoes_db
 	 *     would be executed when adding/removing heirs if these callbacks are not set to NULL.
 	 */ 
-	int (* on_remove_block)(struct blockchain * chain, const uint256_t * block_hash, const int height, void * user_data);
-	int (* on_add_block)(struct blockchain * chain, const uint256_t * block_hash, const int height, void * user_data);
+	int (* on_remove_block)(struct blockchain * chain, 
+		const uint256_t * block_hash, 
+		const int height, void * user_data);
+	int (* on_add_block)(struct blockchain * chain, 
+		const uint256_t * block_hash, const int height, 
+		const struct satoshi_block_header * hdr,
+		void * user_data);
 }blockchain_t;
 
 blockchain_t * blockchain_init(blockchain_t * chain, 
@@ -191,11 +212,15 @@ blockchain_t * blockchain_init(blockchain_t * chain,
 	void * user_data);
 void blockchain_cleanup(blockchain_t * chain);
 
+ssize_t blockchain_get_latest(blockchain_t * chain, uint256_t * hash, struct satoshi_block_header * hdr);
+ssize_t blockchain_get_known_hashes(blockchain_t * chain, size_t max_hashes, uint256_t ** p_hashes);
+
+#define blockchain_lock(chain)   pthread_mutex_lock(&(chain)->mutex)
+#define blockchain_unlock(chain) pthread_mutex_unlock(&(chain)->mutex)
 
 block_info_t * block_info_new(const uint256_t * hash, struct satoshi_block_header * hdr);
 int block_info_add_child(block_info_t * parent, block_info_t * child);
 void block_info_free(block_info_t * info);
-
 
 
 

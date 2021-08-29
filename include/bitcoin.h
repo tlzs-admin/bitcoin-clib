@@ -9,11 +9,14 @@ extern "C" {
 
 enum bitcoin_network_type
 {
-	bitcoin_network_default,
-	bitcoin_network_mainnet,
-	bitcoin_network_testnet,
-	bitcoin_network_regtest,
+	bitcoin_network_type_default,
+	bitcoin_network_type_mainnet,
+	bitcoin_network_type_testnet,
+	bitcoin_network_type_regtest,
+	bitcoin_network_types_count
 };
+const char * bitcoin_network_type_to_string(enum bitcoin_network_type type);
+enum bitcoin_network_type bitcoin_network_type_from_string(const char * type_name);
 
 enum bitcoin_address_prefix
 {

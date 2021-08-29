@@ -37,6 +37,7 @@
 
 #include "blockchain.h"
 #include "crypto.h"
+#include "sha.h"
 
 #include "satoshi-tx.h"
 
@@ -529,9 +530,7 @@ typedef struct satoshi_script_private
 static inline int parse_op_hash(satoshi_script_stack_t * stack, uint8_t op_code, const unsigned char * p, const unsigned char * p_end)
 {
 	int rc = 0;
-	ripemd160_ctx_t ripemd[1];
 	sha256_ctx_t sha[1];
-	
 	satoshi_script_data_t * sdata = stack->pop(stack);
 	if(NULL == sdata)
 	{
@@ -549,9 +548,7 @@ static inline int parse_op_hash(satoshi_script_stack_t * stack, uint8_t op_code,
 	switch(op_code)
 	{
 	case satoshi_script_opcode_op_ripemd160:
-		ripemd160_init(ripemd);
-		ripemd160_update(ripemd, data, length);
-		ripemd160_final(ripemd, hash);
+		ripemd160_hash(data, length, hash);
 		cb_hash = 20;
 		type = satoshi_script_data_type_hash160;
 		break;
@@ -566,17 +563,12 @@ static inline int parse_op_hash(satoshi_script_stack_t * stack, uint8_t op_code,
 		type = satoshi_script_data_type_hash256;
 		if(op_code ==  satoshi_script_opcode_op_hash160)	// ripemd160(sha256(data))
 		{
-			ripemd160_ctx_t ripemd[1];
-			ripemd160_init(ripemd);
-			ripemd160_update(ripemd, hash, 32);
-			ripemd160_final(ripemd, hash);
+			ripemd160_hash(hash, 32, hash);
 			cb_hash = 20;
 			type = satoshi_script_data_type_hash160;
 		}else if(op_code == satoshi_script_opcode_op_hash256) // sha256(sha256(data))
 		{
-			sha256_init(sha);
-			sha256_update(sha, hash, 32);
-			sha256_final(sha, hash);
+			sha256_hash(hash, 32, hash);
 		}
 		break;
 	default:
@@ -689,6 +681,8 @@ static inline int parse_op_checksigverify(satoshi_script_stack_t * stack, satosh
 	crypto_pubkey_t * pubkey = NULL;
 	crypto_signature_t * sig = NULL;
 	unsigned char * sig_der = NULL;
+	satoshi_script_data_t * sdata_pubkey = NULL;
+	satoshi_script_data_t * sdata_sig_hashtype = NULL;
 	
 	if(stack->count < 2)	// must have { sig_with_hashtype, pubkey }
 	{
@@ -706,9 +700,6 @@ static inline int parse_op_checksigverify(satoshi_script_stack_t * stack, satosh
 	assert(crypto);
 	
 	// pop pubkey
-	satoshi_script_data_t * sdata_pubkey = NULL;
-	satoshi_script_data_t * sdata_sig_hashtype = NULL;
-	
 	sdata_pubkey = stack->pop(stack);
 	if(NULL == sdata_pubkey) {
 		scripts_parser_error_handler("no pubkey.");

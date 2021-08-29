@@ -32,8 +32,6 @@
 #include <string.h>
 #include <assert.h>
 
-
-
 #include <ctype.h>		// for ptrdiff_t
 #include <secp256k1.h>	// use https://github.com/bitcoin/bitcoin/tree/master/src/secp256k1
 

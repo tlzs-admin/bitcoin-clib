@@ -35,15 +35,7 @@
 #include <math.h>
 #include <gmp.h>
 
-#ifndef debug_printf 
-#ifdef _DEBUG
-#define debug_printf(fmt, ...) do { \
-		printf("\e[33m" "%s()::"fmt "\e[39m""\n", __FUNCTION__, ##__VA_ARGS__);	\
-	} while(0)
-#else
-#define debug_printf(fmt, ...) do { } while(0)
-#endif
-#endif
+#include "utils.h"
 
 compact_uint256_t uint256_to_compact(const uint256_t * target)
 {
@@ -57,7 +49,7 @@ compact_uint256_t uint256_to_compact(const uint256_t * target)
 	
 	//~ debug_printf("num_zeros: %d", num_zeros);
 	if(num_zeros == 32) { 
-		return compact_uint256_zero;
+		return (compact_uint256_t){0};
 	}
 
 	// make sure that the mantissa represents a positive value 
@@ -80,24 +72,25 @@ compact_uint256_t uint256_to_compact(const uint256_t * target)
 	if((cint.exp + num_bytes) >= 32) num_bytes = 32 - cint.exp; 
 	if((num_zeros + num_bytes) >= 32) num_bytes = 32 - num_zeros;
 	
-	if(num_bytes > 0) memcpy(cint.mantissa, (p_end - num_bytes), num_bytes);
+	if(num_bytes > 0) {
+		memcpy(cint.mantissa, (p_end - num_bytes), num_bytes);
+	}
 	return cint;
 }
 uint256_t compact_to_uint256(const compact_uint256_t * cint)
 {
-	uint256_t target = *uint256_zero;
+	uint256_t target = { 0 };
 	if(cint->exp > 32) return uint256_NaN;
 
 	int num_bytes = 3;
 	int num_zeros = 32 - cint->exp;
 	
-	if((cint->exp + num_bytes) >= 32) num_bytes = 32 - cint->exp; 
+	if(cint->exp < 3) num_bytes = cint->exp;
 	if((num_zeros + num_bytes) >= 32) num_bytes = 32 - num_zeros;
-	debug_printf("num_zeros: %d, num_bytes: %d, exp: 0x%.2x", num_zeros, num_bytes, (int)cint->exp);
+//	debug_printf("num_zeros: %d, num_bytes: %d, exp: 0x%.2x", num_zeros, num_bytes, (int)cint->exp);
 	
 	unsigned char * p = (unsigned char *)&target + cint->exp - num_bytes;
 	memcpy(p, cint->mantissa, num_bytes);
-
 	return target;
 }
 
@@ -149,8 +142,6 @@ double uint256_div(const uint256_t * restrict n, const uint256_t * restrict d)
 	return result;
 }
 
-
-
 int compact_uint256_compare(const compact_uint256_t * restrict a, const compact_uint256_t * restrict b)
 {
 	int value_a = a->bits & 0x0ffffff;
@@ -177,9 +168,9 @@ int compact_uint256_compare(const compact_uint256_t * restrict a, const compact_
 int uint256_compare(const uint256_t * restrict  _a, const uint256_t * restrict _b)
 {
 	// treat uint256 as little-endian
-	uint32_t * a = (uint32_t *)_a;
-	uint32_t * b = (uint32_t *)_b;
-	for(int i = 7; i >= 0; --i)
+	uint64_t * a = (uint64_t *)_a;
+	uint64_t * b = (uint64_t *)_b;
+	for(int i = 3; i >= 0; --i)
 	{
 		if(a[i] == b[i]) continue;
 		return (a[i] > b[i])?1:-1;
@@ -194,252 +185,97 @@ int uint256_compare_with_compact(const uint256_t * restrict hash, const compact_
 }
 
 
-#if defined(_TEST_COMPACT_INT) && defined(_STAND_ALONE)
-
-#ifndef dump_line
-#define dump_line(prefix, data, size) do { 	\
-		fprintf(stderr, "%s", prefix);		\
-		for(ssize_t i = 0; i < size; ++i) fprintf(stderr, "%.2x", ((unsigned char*)data)[i]);	\
-		fprintf(stderr, "\n");				\
-	} while(0)
-#endif
-
-#include <stdint.h>
-int main(int argc, char **argv)
+#define UINT256_BYTE_ORDER (1) 	// big-endian
+void uint256_add(uint256_t * c, const uint256_t *a, const uint256_t *b)
 {
-	// (000000000000000000000000000000000000000000000000) CB0404 0000000000
-	static const uint256_t TARGET = {
-		.val = {
-			[24] = 0xcb,
-			[25] = 0x04,
-			[26] = 0x04,
-		},
-	};
-	static const uint32_t BITS = 0x1b0404cb;
-	compact_uint256_t cint = {.bits = 0x1b0404cb };
+	assert(a && b && c);
+	memset(c, 0, sizeof(*c));
 	
-	printf("== test1: compact_int_to_uint256() ...\n");
-	printf("\tcint    : 0x%.8x\n", cint.bits); 
-	dump_line("\tcintdata:   ", &cint, sizeof(cint));
+	mpz_t ma, mb, mc;
+	mpz_inits(ma, mb, mc, NULL);
 	
-	uint256_t target = compact_to_uint256(&cint);
-	dump_line("\ttarget: ", &target, 32);
-	dump_line("\tTARGET: ", &TARGET, 32);
+	mpz_import(ma, 1, UINT256_BYTE_ORDER, sizeof(*a), 0, 0, a);
+	mpz_import(mb, 1, UINT256_BYTE_ORDER, sizeof(*b), 0, 0, b);
+	mpz_add(mc, ma, mb);
 	
-	assert(0 == memcmp(&target, &TARGET, 32));
-	
-	printf("== test2: uint256_to_compact_int() ...\n");
-	cint = uint256_to_compact(&TARGET);
-	
-	dump_line("\tTARGET: ", &TARGET, 32);
-	printf("\tcint    : 0x%.8x\n", cint.bits); 
-	dump_line("\tcintdata:   ", &cint, sizeof(cint));
-	
-	assert(cint.bits == BITS);
-	
-	
-	static const uint32_t BITS_test_3_4 = 0x1e0004cb;
-	static const uint256_t TARGET_test_3_4 = {
-		.val = {
-			[28] = 0xcb,
-			[29] = 0x04,
-		},
-	};
-	printf("== test3: compact_int_to_uint256(cint=0x%.8x) ...\n", BITS_test_3_4);
-	cint.bits = 0;
-	cint.exp = 30;
-	cint.mantissa[0] = 0xcb;
-	cint.mantissa[1] = 0x04;
-	
-	target = compact_to_uint256(&cint);
-	printf("\tcint    : 0x%.8x\n", cint.bits); 
-	dump_line("\tcintdata:   ", &cint, sizeof(cint));
-	dump_line("\ttarget: ", &target, 32);
-	assert(0 == memcmp(&target, &TARGET_test_3_4, 32));
-
-	printf("== test4: uint256_to_cint() ==> cint=0x%.8x ...\n", BITS_test_3_4);
-	cint.bits = 0;
-	cint = uint256_to_compact(&target);
-	dump_line("\ttarget: ", &target, 32);
-	printf("\tcint    : 0x%.8x\n", cint.bits); 
-	dump_line("\tcintdata:   ", &cint, sizeof(cint));
-	assert(cint.bits == BITS_test_3_4);
-	
-	
-	static const uint32_t BITS_test_5_6 = 0x020004cb;
-	static const uint256_t TARGET_test_5_6 = {
-		.val = {
-			[0] = 0xcb,
-			[1] = 0x04,
-		},
-	};
-	
-	printf("== test5: compact_int_to_uint256(cint=0x%.8x) ...\n", BITS_test_5_6);
-	cint.bits = 0;
-	cint.exp = 2;
-	cint.mantissa[0] = 0xcb;
-	cint.mantissa[1] = 0x04;
-	
-	target = compact_to_uint256(&cint);
-	printf("\tcint    : 0x%.8x\n", cint.bits); 
-	dump_line("\tcintdata:   ", &cint, sizeof(cint));
-	dump_line("\ttarget: ", &target, 32);
-	assert(0 == memcmp(&target, &TARGET_test_5_6, 32));
-
-	
-	printf("== test6: uint256_to_cint() ==> cint=0x%.8x...\n", BITS_test_5_6);
-	cint.bits = 0;
-	cint = uint256_to_compact(&target);
-	dump_line("\ttarget: ", &target, 32);
-	printf("\tcint    : 0x%.8x\n", cint.bits); 
-	dump_line("\tcintdata:   ", &cint, sizeof(cint));
-	assert(cint.bits == BITS_test_5_6);
-	
-	
-	static const uint32_t BITS_test_7_8 = 0x1d00ffff;	// difficulty one
-	static const uint256_t TARGET_test_7_8 = {
-		.val = {
-			[26] = 0xff,
-			[27] = 0xff,
-		},
-	};
-	printf("== test7: compact_int_to_uint256(cint=0x%.8x) ...\n", BITS_test_7_8);
-	cint.bits = BITS_test_7_8;
-	target = compact_to_uint256(&cint);
-	printf("\tcint    : 0x%.8x\n", cint.bits); 
-	dump_line("\tcintdata:   ", &cint, sizeof(cint));
-	dump_line("\ttarget: ", &target, 32);
-	assert(0 == memcmp(&target, &TARGET_test_7_8, 32));
-
-	
-	printf("== test8: uint256_to_cint() ==> cint=0x%.8x...\n", BITS_test_7_8);
-	cint = uint256_to_compact(&target);
-	dump_line("\ttarget: ", &target, 32);
-	printf("\tcint    : 0x%.8x\n", cint.bits); 
-	dump_line("\tcintdata:   ", &cint, sizeof(cint));
-	assert(cint.bits == BITS_test_7_8);
-	
-	/* 
-	 * test bdiff
-	 * 0x00000000FFFF0000000000000000000000000000000000000000000000000000 / 0x00000000000404CB000000000000000000000000000000000000000000000000 
-	 * = 16307.420938523983 (bdiff)
-	 */
-	cint.bits = BITS;	// 0x1b0404cb;
-	
-	double result = compact_uint256_div(&compact_uint256_difficulty_one, &cint);
-	printf("bdiff: %.8f\n", result);
-	
-	
-	/*
-	 * test pdiff: 
-	 * 0x00000000FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF / 0x00000000000404CB000000000000000000000000000000000000000000000000 
-	 * = 16307.669773817162 (pdiff)
-	 */
-	target = TARGET;
-	uint256_t difficulty_one = uint256_difficulty_one;
-	result = uint256_div(&difficulty_one, &target);
-	dump_line("\tDIFF_ONE: ", &difficulty_one, 32);
-	dump_line("\tTARGET: ", &target, 32);
-	printf("pdiff: %.8f\n", result);
-	
-	
-	
-	// test comare functions
-	printf("==== compact_uint256_compare(0x%.8x, 0x%.8x): \n", compact_uint256_difficulty_one.bits, cint.bits);
-	int diff = compact_uint256_compare(&compact_uint256_difficulty_one, &cint);
-	printf("diff = %d\n", diff);
-	assert(diff > 0);
-	
-	printf("==== compact_uint256_compare(0x%.8x, 0x%.8x): \n", cint.bits, compact_uint256_difficulty_one.bits);
-	diff = compact_uint256_compare(&cint, &compact_uint256_difficulty_one);
-	printf("diff = %d\n", diff);
-	assert(diff < 0);
-	
-	printf("==== uint256_compare(a, b): \n");
-	dump_line("\ta=", &difficulty_one, 32);
-	dump_line("\tb=", &target, 32);
-	diff = uint256_compare(&difficulty_one, &target);
-	printf("diff = %d\n", diff);
-	assert(diff > 0);
-	
-	printf("==== uint256_compare(a, b): \n");
-	dump_line("\ta=", &target, 32);
-	dump_line("\tb=", &difficulty_one, 32);
-	
-	diff = uint256_compare(&target, &difficulty_one);
-	printf("diff = %d\n", diff);
-	assert(diff < 0);
-	
-	
-	printf("==== uint256_compare_with_compact(hash, target): \n");
-	dump_line("\thash=", &difficulty_one, 32);
-	printf("\ttarget=0x%.8x\n", cint.bits);
-	
-	diff = uint256_compare_with_compact(&difficulty_one, &cint);
-	printf("diff = %d\n", diff);
-	assert(diff > 0);
-	
-	
-	printf("==== uint256_compare_with_compact(hash, target): \n");
-	dump_line("\thash=", &target, 32);
-	printf("\ttarget=0x%.8x", compact_uint256_difficulty_one.bits);
-	
-	diff = uint256_compare_with_compact(&target, &compact_uint256_difficulty_one);
-	printf("diff = %d\n", diff);
-	assert(diff < 0);
-	
-	// test NaN
-	printf("==== uint256_compare_with_compactNaN(hash, NaN): \n");
-	dump_line("\thash=", &target, 32);
-	printf("\tNaN=0x%.8x\n", compact_uint256_NaN.bits);
-	
-	diff = uint256_compare_with_compact(&target, &compact_uint256_NaN);
-	printf("diff = %d\n", diff);
-	assert(diff < 0);
-	
-	printf("==== uint256_compare_with_compact(NaN, target): \n");
-	dump_line("\thash=", &uint256_NaN, 32);
-	printf("\tNaN=0x%.8x\n", cint.bits);
-	
-	diff = uint256_compare_with_compact(&uint256_NaN, &cint);
-	printf("diff = %d\n", diff);
-	assert(diff > 0);
-	
-	
-	printf("==== uint256_compare(a, b): \n");
-	dump_line("\ta=(NaN)", &uint256_NaN, 32);
-	dump_line("\tb=(one)", &difficulty_one, 32);
-	
-	diff = uint256_compare(&uint256_NaN, &difficulty_one);
-	printf("diff = %d\n", diff);
-	assert(diff > 0);
-	
-	printf("==== uint256_compare(a, b): \n");
-	dump_line("\ta=(one)", &difficulty_one, 32);
-	dump_line("\tb=(NaN)", &uint256_NaN, 32);
-	
-	diff = uint256_compare(&difficulty_one, &uint256_NaN);
-	printf("diff = %d\n", diff);
-	assert(diff < 0);
-	
-	
-	printf("==== compact_uint256_compare(a, b): \n");
-	printf("\ta=(one)0x%.8x\n", compact_uint256_NaN.bits);
-	printf("\tb=(NaN)0x%.8x\n", compact_uint256_difficulty_one.bits);
-	
-	diff = compact_uint256_compare(&compact_uint256_NaN, &compact_uint256_difficulty_one);
-	printf("diff = %d\n", diff);
-	assert(diff > 0);
-	
-	printf("==== compact_uint256_compare(a, b): \n");
-	printf("\ta=(one)0x%.8x\n", compact_uint256_difficulty_one.bits);
-	printf("\tb=(NaN)0x%.8x\n", compact_uint256_NaN.bits);
-	
-	diff = compact_uint256_compare(&compact_uint256_difficulty_one, &compact_uint256_NaN);
-	printf("diff = %d\n", diff);
-	assert(diff < 0);
-	
-	return 0;
+	size_t count = 0;
+	mpz_export(c, &count, UINT256_BYTE_ORDER, sizeof(*c), 0, 0, mc);
+	assert(count == 1);
+	return;
 }
-#endif
 
+
+compact_uint256_t compact_uint256_add(const compact_uint256_t a, const compact_uint256_t b)
+{
+	uint256_t ua, ub, uc;
+	memset(&uc, 0, sizeof(uc));
+	
+	ua = compact_to_uint256(&a);
+	ub = compact_to_uint256(&b);
+	
+	dump_line("ua: ", &ua, sizeof(ua));
+	dump_line("ub: ", &ub, sizeof(ub));
+	
+	uint256_add(&uc, &ua, &ub);
+	dump_line("uc: ", &uc, sizeof(uc));
+	
+	return uint256_to_compact(&uc);
+} 
+
+/**
+ * https://en.bitcoin.it/wiki/Difficulty
+**/
+
+static inline double calc_difficulty(const compact_uint256_t * cint, const uint256_t * difficulty_one)
+{
+	uint256_t u_target = compact_to_uint256(cint);
+	double difficulty = 1.0;
+	
+	//~ dump_line("one   : ", difficulty_one, 32);
+	//~ dump_line("target: ", &u_target, 32);
+	
+	mpz_t m_one, m_target;
+	mpz_inits(m_one, m_target, NULL);
+	mpz_import(m_one, 1, -1, sizeof(uint256_t), 0, 0, difficulty_one);
+	mpz_import(m_target, 1, -1, sizeof(uint256_t), 0, 0, &u_target);
+	
+	mpf_t one, target, bdiff;
+	mpf_inits(one, target, bdiff, NULL); 
+	mpf_set_z(one, m_one);
+	mpf_set_z(target, m_target);
+	mpf_div(bdiff, one, target);
+	
+	difficulty = mpf_get_d(bdiff);
+	
+	mpf_clears(one, target, bdiff, NULL);
+	mpz_clears(m_one, m_target, NULL);
+	return difficulty;
+}
+
+double compact_uint256_to_bdiff(const compact_uint256_t * cint)
+{
+	static const uint256_t bitcoin_difficulty_one = {{
+		0x00, 0x00, 0x00, 0x00,  0x00, 0x00, 0x00, 0x00, 
+		0x00, 0x00, 0x00, 0x00,  0x00, 0x00, 0x00, 0x00, 
+		0x00, 0x00, 0x00, 0x00,  0x00, 0x00, 0x00, 0x00, 
+		0x00, 0x00, 0xFF, 0xFF,  0x00, 0x00, 0x00, 0x00, 
+	}};
+	
+	debug_printf("==== %s() ====", __FUNCTION__);
+	return calc_difficulty(cint, &bitcoin_difficulty_one);
+	
+}
+double compact_uint256_to_pdiff(const compact_uint256_t * cint)
+{
+	static const uint256_t pool_difficulty_one = {{
+		0XFF, 0XFF, 0XFF, 0XFF,  0XFF, 0XFF, 0XFF, 0XFF, 
+		0XFF, 0XFF, 0XFF, 0XFF,  0XFF, 0XFF, 0XFF, 0XFF, 
+		0XFF, 0XFF, 0XFF, 0XFF,  0XFF, 0XFF, 0XFF, 0XFF, 
+		0xFF, 0xFF, 0xFF, 0xFF,  0x00, 0x00, 0x00, 0x00, 
+	}};
+	
+	debug_printf("==== %s() ====", __FUNCTION__);
+	return calc_difficulty(cint, &pool_difficulty_one);
+}
+
+#undef UINT256_BYTE_ORDER

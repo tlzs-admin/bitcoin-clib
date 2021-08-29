@@ -31,6 +31,7 @@
 #include <string.h>
 #include <assert.h>
 
+#include "bitcoin-consensus.h"
 #include "satoshi-types.h"
 #include "satoshi-tx.h"
 #include "crypto.h"
@@ -39,21 +40,421 @@
 #include <stdint.h>
 #include <inttypes.h>
 #include "satoshi-script.h"
+#include "utils.h"
 
-
-#ifndef debug_printf
-#define debug_printf(fmt, ...) do { \
-		fprintf(stderr, "\e[33m" "%s@%d::%s(): " fmt "\e[39m\n", 	\
-			__FILE__, __LINE__, __FUNCTION__,						\
-			##__VA_ARGS__);											\
+#ifdef _DEBUG
+#define message_parser_error_handler(fmt, ...) do { \
+		fprintf(stderr, "\e31m[ERROR]::%s@%d::%s(): " fmt "\e[39m" "\n", \
+			__FILE__, __LINE__, __FUNCTION__,	\
+			##__VA_ARGS__);						\
+		abort();								\
+		goto label_error;						\
+	} while(0)
+#else
+#define message_parser_error_handler(fmt, ...) do { \
+		fprintf(stderr, "\e31m[ERROR]::%s@%d::%s(): " fmt "\e[39m" "\n", \
+			__FILE__, __LINE__, __FUNCTION__,	\
+			##__VA_ARGS__);						\
+		goto label_error;						\
 	} while(0)
 #endif
 
-#define debug_dump(prefix, data, length) do {						\
-		fprintf(stderr, "\e[33m" "%s: ",	prefix);				\
-		dump2(stderr, data, length);								\
-		fprintf(stderr, "\e[39m\n");							\
-	} while(0)
+
+#define parse_data(p, p_end, data_type, dst) ({	\
+		const unsigned char * ret = NULL;		\
+		if((p + sizeof(data_type)) <= p_end) {	\
+			dst = *(data_type *)p;				\
+			p += sizeof(data_type);				\
+			ret = p;							\
+		}										\
+		ret;									\
+	})
+	
+/** 
+ * parse_varstr:
+ * 	@return 
+ * 		next offset on success, 
+ * 		NULL on error.
+ */
+static inline const unsigned char * parse_varstr(
+	const unsigned char * p, 
+	const unsigned char * p_end,
+	varstr_t ** p_dst)
+{
+	assert(p_dst);
+	if(p >= p_end) return NULL;
+	
+	size_t vstr_size = varstr_size((varstr_t *)p);
+	if((p + vstr_size) > p_end) return NULL;
+	
+	*p_dst = varstr_clone((varstr_t *)p);
+	return (p + vstr_size);
+}
+
+/** 
+ * parse_varint:
+ * 	@return 
+ * 		next offset on success, 
+ * 		NULL on error.
+ */
+static inline const unsigned char * parse_varint(
+	const unsigned char * p, 
+	const unsigned char * p_end,
+	ssize_t * value)
+{
+	assert(value);
+	
+	if(p >= p_end) return NULL;
+	
+	size_t vint_size = varint_size((varint_t *)p);
+	if((p + vint_size) > p_end) return NULL;
+	
+	*value = varint_get((varint_t *)p);
+	return (p + vint_size);
+}
+
+ssize_t satoshi_tx_parse(satoshi_tx_t * tx, ssize_t length, const void * payload)
+{
+	assert(tx);
+	assert(length > 0 && length <= MAX_BLOCK_SERIALIZED_SIZE);
+	
+	const unsigned char * p = payload;
+	const unsigned char * p_end = p + length;
+	
+	sha256_ctx_t sha[1];	// calc tx_hash
+	sha256_init(sha);
+	
+	// parse version
+	p = parse_data(p, p_end, int32_t, tx->version);
+	if(NULL == p) {
+		message_parser_error_handler("parse version failed: %s", "invalid payload length");
+	}
+	sha256_update(sha, (unsigned char *)&tx->version, sizeof(tx->version));	// hash [nVersion]
+	
+	// parse witness flag, If present, always 0001, and indicates the presence of witness data
+	if((p + 2) > p_end){
+		message_parser_error_handler("parse flags failed: %s", "invalid payload length");
+	}
+	if(p[0] == 0) {	// has witness flag
+		if(p[1] != 1) {	// According to current protocol (2020/05/26), witness-flag MUST BE {0x00, 0x01}.
+			message_parser_error_handler("invalid witness flag: '%.2x %.2x'", p[0], p[1]);
+		}
+		
+		tx->has_flag = 1;
+		tx->flag[0] = p[0];
+		tx->flag[1] = p[1];
+		p += 2;
+	}
+	
+	// parse txins
+	if(p >= p_end) message_parser_error_handler("parse txins failed: %s", "invalid payload length");
+	
+	varint_t * num_txins = (varint_t *)p;
+	p = parse_varint(p, p_end, &tx->txin_count);
+	if(NULL == p)
+	{
+		message_parser_error_handler("parse txin_count failed: %s", "invalid payload length");
+	}
+
+	if(tx->txin_count <= 0) message_parser_error_handler("invalid txins count: %d", (int)tx->txin_count);
+	
+	satoshi_txin_t * txins = calloc(tx->txin_count, sizeof(*txins));
+	assert(txins);
+	tx->txins = txins;
+	
+	const unsigned char * txins_data = p;
+	for(ssize_t i = 0; i < tx->txin_count; ++i)
+	{
+		if(p >= p_end) message_parser_error_handler("no txins[%d] data.", (int)i);
+		ssize_t cb_payload = satoshi_txin_parse(&txins[i], (p_end - p), p);
+		if(cb_payload <= 0) message_parser_error_handler("parse txins[%d] failed.", (int)i);
+		p += cb_payload;
+	}
+	
+	// hash [txins]: {num_txins, txins_data}
+	sha256_update(sha, (unsigned char *)num_txins, varint_size(num_txins));
+	sha256_update(sha, txins_data, (p - txins_data));
+	
+	// parse txouts
+	varint_t * num_txouts = (varint_t *)p;
+	p = parse_varint(p, p_end, &tx->txout_count);
+	if(NULL == p) message_parser_error_handler("parse txout failed: %s", "invalid payload length");
+	if(tx->txout_count <= 0) message_parser_error_handler("invalid txouts count: %d", (int)tx->txout_count);
+	
+	satoshi_txout_t * txouts = calloc(tx->txout_count, sizeof(*txouts));
+	assert(txouts);
+	tx->txouts = txouts;
+	
+	const unsigned char * txouts_data = p;
+	for(ssize_t i = 0; i < tx->txout_count; ++i)
+	{
+		if(p >= p_end) message_parser_error_handler("no txout[%d] data.", (int)i);
+		ssize_t cb_payload = satoshi_txout_parse(&txouts[i], (p_end - p), p);
+		if(cb_payload <= 0) message_parser_error_handler("parse txout[%d] failed.", (int)i);
+		p += cb_payload;
+	}
+	
+	// hash [txouts]: {num_txouts, txouts_data}
+	sha256_update(sha, (unsigned char *)num_txouts, varint_size(num_txouts));
+	sha256_update(sha, txouts_data, (p - txouts_data));
+	
+	// parse witnesses_data if has
+	tx->cb_witnesses = 0;
+	
+	if( tx->has_flag 
+		&& ((p + sizeof(uint32_t)) < p_end)	// has witness data
+	  ) 
+	{
+		/*
+		 * parse payload to witnesses[(tx->txins_count)] array
+		 * each txin is associated with a witness field
+		 * if a txin is non-witness, set witness to 0x00.
+		 */
+		assert(tx->txin_count > 0);
+		bitcoin_tx_witness_t * witnesses = calloc(tx->txin_count, sizeof(*tx->witnesses));
+		assert(witnesses);
+		
+		tx->witnesses = witnesses;
+		const unsigned char * p_witnesses = p;
+		for(ssize_t i = 0; i < tx->txin_count; ++i)
+		{
+			if(p >= p_end) message_parser_error_handler("parse witness data failed: %s.", "invalid payload length");
+			
+			ssize_t num_items = 0;
+			p = parse_varint(p, p_end, &num_items);
+			if(NULL == p) {
+				message_parser_error_handler("parse witness data failed: %s.", 
+					"invalid payload length");
+			}
+			
+			witnesses[i].num_items = num_items;
+			
+			if(num_items > 0)
+			{
+				varstr_t ** items = calloc(num_items, sizeof(*items));
+				assert(items);
+				witnesses[i].items = items;
+				
+				for(ssize_t item_index = 0; item_index < num_items; ++item_index)
+				{
+					if(p >= p_end) {
+						message_parser_error_handler("parse witness data failed: %s.", 
+							"invalid payload length");
+					}
+					
+					p = parse_varstr(p, p_end, &items[item_index]);
+					if(NULL == p) {
+						message_parser_error_handler("parse witness data failed: %s.", 
+							"invalid payload length");
+					}
+				}
+				
+			}
+		}
+		tx->cb_witnesses = p - p_witnesses;
+	}
+	
+	// parse lock_time
+	if((p + sizeof(uint32_t)) > p_end)
+		message_parser_error_handler("parse locktime failed: %s", "invalid payload length");
+	tx->lock_time = *(uint32_t *)p;
+	p += sizeof(uint32_t);
+	
+	// hash [nLockTime]
+	sha256_update(sha, (unsigned char *)&tx->lock_time, sizeof(uint32_t));
+	
+	// calc txid: (double SHA256)
+	sha256_final(sha, (unsigned char *)tx->txid);
+	sha256_init(sha);
+	sha256_update(sha, (unsigned char *)tx->txid, 32);
+	sha256_final(sha, (unsigned char *)tx->txid);
+	
+	ssize_t cb_payload = p - (unsigned char *)payload;
+	if(tx->has_flag) { // calc wtxid
+		hash256(payload, cb_payload, (unsigned char *)tx->wtxid);
+	}
+	return cb_payload;
+label_error:
+	satoshi_tx_cleanup(tx);
+	return -1;
+}
+
+void bitcoin_tx_witness_cleanup(bitcoin_tx_witness_t * witness)
+{
+	if(NULL == witness) return;
+	for(ssize_t ii = 0; ii < witness->num_items; ++ii)
+	{
+		free(witness->items[ii]);
+	}
+	free(witness->items);
+	witness->items = NULL;
+	witness->num_items = 0;
+	return;
+}
+
+void satoshi_tx_cleanup(satoshi_tx_t * tx)
+{
+	if(NULL == tx) return;
+	
+	if(tx->has_flag && tx->witnesses)
+	{
+		for(ssize_t i = 0; i < tx->txin_count; ++i)
+		{
+			bitcoin_tx_witness_cleanup(&tx->witnesses[i]);
+		}
+		free(tx->witnesses);
+		tx->witnesses = NULL;
+	}
+	
+	if(tx->txins)
+	{
+		for(ssize_t i = 0; i < tx->txin_count; ++i)
+		{
+			satoshi_txin_cleanup(&tx->txins[i]);
+		}
+		free(tx->txins);
+		tx->txins = NULL;
+		tx->txin_count = 0;
+	}
+	if(tx->txouts)
+	{
+		for(ssize_t i = 0; i < tx->txout_count; ++i)
+		{
+			satoshi_txout_cleanup(&tx->txouts[i]);
+		}
+		free(tx->txouts);
+		tx->txouts = NULL;
+		tx->txout_count = 0;
+	}
+	
+	
+	return;
+}
+
+ssize_t satoshi_tx_serialize(const satoshi_tx_t * tx, unsigned char ** p_data)
+{
+	ssize_t txin_vint_size = varint_calc_size(tx->txin_count);
+	ssize_t txout_vint_size = varint_calc_size(tx->txout_count);
+	
+	ssize_t txins_size = 0;
+	ssize_t txouts_size = 0;
+	for(ssize_t i = 0; i < tx->txin_count; ++i)
+	{
+		ssize_t cb = satoshi_txin_serialize(&tx->txins[i], NULL);
+		assert(cb > 0);
+		txins_size += cb;
+	}
+	for(ssize_t i = 0; i < tx->txout_count; ++i)
+	{
+		ssize_t cb = satoshi_txout_serialize(&tx->txouts[i], NULL);
+		assert(cb > 0);
+		txouts_size += cb;
+	}
+	
+	ssize_t tx_size = sizeof(int32_t)	// version
+		+ (tx->has_flag?2:0)			// witness data flags
+		+ txin_vint_size
+		+ txins_size
+		+ txout_vint_size
+		+ txouts_size
+		+ (tx->has_flag?tx->cb_witnesses:0)
+		+ sizeof(uint32_t)	// lock_time
+		;
+	if(NULL == p_data) return tx_size;
+	
+	unsigned char * payload = *p_data;
+	if(NULL == payload)
+	{
+		payload = malloc(tx_size);
+		assert(payload);
+		*p_data = payload;
+	}
+	
+	unsigned char * p = payload;
+	unsigned char * p_end = p + tx_size;
+	
+	// version
+	assert((p + sizeof(int32_t)) < p_end); 
+	*(int32_t *)p = tx->version;
+	p += sizeof(int32_t);
+	
+	// witness flags
+	if(tx->has_flag)
+	{
+		assert((p + 2) < p_end);
+		p[0] = 0;
+		p[1] = 1;
+		p += 2;
+	}
+	
+	// txins
+	assert((p + txin_vint_size) < p_end);
+	varint_set((varint_t *)p, tx->txin_count);
+	p += txin_vint_size;
+	
+	for(ssize_t i = 0; i < tx->txin_count; ++i)
+	{
+		assert(p < p_end);
+		ssize_t cb = satoshi_txin_serialize(&tx->txins[i], &p);
+		assert(cb > 0);
+		p += cb;
+	}
+	
+	// txouts
+	assert((p + txout_vint_size) < p_end);
+	varint_set((varint_t *)p, tx->txout_count);
+	p += txout_vint_size;
+	
+	for(ssize_t i = 0; i < tx->txout_count; ++i)
+	{
+		assert(p < p_end);
+		ssize_t cb = satoshi_txout_serialize(&tx->txouts[i], &p);
+		assert(cb > 0);
+		p += cb;
+	}
+	
+	// witnesses data
+	if(tx->has_flag)
+	{
+		assert(tx->cb_witnesses > 0 && tx->witnesses);
+		unsigned char * p_witnesses = p;
+		assert((p + tx->cb_witnesses) < p_end);
+		
+		bitcoin_tx_witness_t * witnesses = tx->witnesses;
+		for(ssize_t i = 0; i < tx->txin_count; ++i)
+		{
+			// write items count
+			ssize_t num_items = witnesses[i].num_items;
+			varint_set((varint_t *)p, num_items);
+			p += varint_size((varint_t *)p);
+			
+			if(num_items)
+			{
+				varstr_t ** items = witnesses[i].items;
+				assert(items);
+				
+				for(ssize_t ii = 0; ii < num_items; ++ii)
+				{
+					varstr_t * item = items[ii];
+					assert(item);
+					ssize_t item_size = varstr_size(item);
+					memcpy(p, item, item_size);
+					p += item_size;
+				}
+			}
+		}
+		assert((p_witnesses + tx->cb_witnesses) == p); 
+	}
+	
+	// lock_time
+	assert((p + sizeof(uint32_t)) == p_end);
+	*(uint32_t *)p = tx->lock_time;
+	p += sizeof(uint32_t);
+	
+	assert((p - payload) == tx_size);
+	return tx_size;
+}
+
 
 /**
  * Segregated Witness: 
@@ -113,7 +514,7 @@ static ssize_t segwit_v0_generate_preimage(const satoshi_tx_t * tx,
 	unsigned char * p_end = p + cb_image;
 	// 1. nVersion of the transaction (4-byte little endian)
 	*(uint32_t *)p = tx->version;
-	debug_dump("version", p, 4);
+	dump_line("version: ", p, 4);
 	p += sizeof(uint32_t);
 	
     // 2. hashPrevouts (32-byte hash)	( sha256(sha256(outpoints[])) )
@@ -121,7 +522,7 @@ static ssize_t segwit_v0_generate_preimage(const satoshi_tx_t * tx,
     sha256_init(sha);
     for(ssize_t i = 0; i < tx->txin_count; ++i)
     {
-		debug_dump("  --> hash outpoint: ", &txins[i].outpoint, sizeof(satoshi_outpoint_t));
+		dump_line("  --> hash outpoint: ", &txins[i].outpoint, sizeof(satoshi_outpoint_t));
 		sha256_update(sha, (unsigned char *)&txins[i].outpoint, sizeof(satoshi_outpoint_t));
 	}
 	sha256_final(sha, hash);
@@ -129,7 +530,7 @@ static ssize_t segwit_v0_generate_preimage(const satoshi_tx_t * tx,
 	sha256_update(sha, hash, 32);
 	sha256_final(sha, p);	// write hash256() result 
 	
-	debug_dump("hashPrevouts", p, 32);
+	dump_line("hashPrevouts: ", p, 32);
 	p += sizeof(uint256_t);
     
     // 3. hashSequence (32-byte hash)
@@ -143,7 +544,7 @@ static ssize_t segwit_v0_generate_preimage(const satoshi_tx_t * tx,
 	sha256_update(sha, hash, 32);
 	sha256_final(sha, p);	// write hash256() result 
 	
-	debug_dump("hashSequence", p, 32);
+	dump_line("hashSequence: ", p, 32);
 	p += sizeof(uint256_t);
 	
    //  4. outpoint (32-byte hash + 4-byte little endian) 
@@ -156,12 +557,12 @@ static ssize_t segwit_v0_generate_preimage(const satoshi_tx_t * tx,
    
    //  6. value of the output spent by this input (8-byte little endian)
    *(int64_t *)p = utxo->value;
-   debug_dump("value", p, 8);
+   dump_line("value: ", p, 8);
    p += sizeof(int64_t);
    
    //  7. nSequence of the input (4-byte little endian)
    *(uint32_t *)p = txins[cur_index].sequence;
-   debug_dump("sequence", p, 4);
+   dump_line("sequence: ", p, 4);
    p += sizeof(uint32_t);
 
    //  8. hashOutputs (32-byte hash)
@@ -179,12 +580,12 @@ static ssize_t segwit_v0_generate_preimage(const satoshi_tx_t * tx,
 	sha256_update(sha, hash, 32);
 	sha256_final(sha, p);	// write hash256() result 
 	
-	debug_dump("hashOutputs", p, 32);
+	dump_line("hashOutputs: ", p, 32);
 	p += 32;
 	
     // 9. nLocktime of the transaction (4-byte little endian)
     *(uint32_t *)p = tx->lock_time;
-    debug_dump("lock_time", p, 4);
+    dump_line("lock_time: ", p, 4);
     p += sizeof(uint32_t);
     
     // 10. sighash type of the signature (4-byte little endian)
@@ -198,7 +599,7 @@ static ssize_t segwit_v0_generate_preimage(const satoshi_tx_t * tx,
 #endif
 
 	*(uint32_t *)p = hash_type;
-	debug_dump("hash_type", p, 4);
+	dump_line("hash_type: ", p, 4);
 	p += sizeof(uint32_t);
 	
 	assert(p == p_end);
@@ -510,7 +911,7 @@ void satoshi_tx_dump(const satoshi_tx_t * tx)
 	{
 		const satoshi_txin_t * txin = &tx->txins[i];
 		printf("\t== txins[%d] ==\n", (int)i);
-		printf("\t" "outpoint: "); dump(&txin->outpoint.prev_hash, 32); printf(" %.8d\n", (int)txin->outpoint.index);
+		printf("\t" "outpoint: "); dump(&txin->outpoint.prev_hash, 32); printf(" %.8u\n", (uint32_t)txin->outpoint.index);
 		printf("\t" "sig_scripts: (cb=%d)", (int)txin->cb_scripts); 
 			dump(varstr_getdata_ptr(txin->scripts), txin->cb_scripts); printf("\n");
 		

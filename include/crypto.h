@@ -8,8 +8,7 @@ extern "C" {
 
 #include "sha.h"
 #include "hmac.h"
-#include "aes.h"
-#include "ripemd.h"
+
 
 enum crypto_backend_type
 {
